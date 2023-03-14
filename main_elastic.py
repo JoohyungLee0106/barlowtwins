@@ -24,13 +24,17 @@ from pygit2 import Repository
 import socket
 from datetime import datetime
 from resnet import resnet18, resnet34, resnet50, resnet101
-
+from torch.distributed.elastic.utils.data import ElasticDistributedSampler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
+from datetime import timedelta
+import torch.backends.cudnn as cudnn
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
 parser.add_argument('--data', type=Path, default='/home/chris/storage/imagenet', help='path to dataset')
 parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loader workers')
-parser.add_argument('--epochs', default=100, type=int, metavar='N',
+parser.add_argument('--epochs', default=4, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--batch-size', default=2048, type=int, metavar='N',
                     help='mini-batch size')
@@ -47,7 +51,7 @@ parser.add_argument('--projector', default='8192-8192-8192', type=str,
 parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
 parser.add_argument('--checkpoint-dir', default='/nfs/thena/chris/equi/ckpts', type=Path, help='path to checkpoint directory')
-
+parser.add_argument( "--dist-backend", default="nccl", choices=["nccl", "gloo"], type=str, help="distributed backend")
 
 
 parser.add_argument( "--dataset", default="IMAGENET", choices=["IMAGENET", "CIFAR100", "CIFAR10"], type=str, help="Dataset")
@@ -85,35 +89,14 @@ def main():
             if not(os.path.isdir(tempdir)):
                 os.mkdir(tempdir)
             args.checkpoint_dir = tempdir
-
-
-    args.ngpus_per_node = torch.cuda.device_count()
-    if 'SLURM_JOB_ID' in os.environ:
-        # single-node and multi-node distributed training on SLURM cluster
-        # requeue job on SLURM preemption
-        signal.signal(signal.SIGUSR1, handle_sigusr1)
-        signal.signal(signal.SIGTERM, handle_sigterm)
-        # find a common host name on all nodes
-        # assume scontrol returns hosts in the same order on all nodes
-        cmd = 'scontrol show hostnames ' + os.getenv('SLURM_JOB_NODELIST')
-        stdout = subprocess.check_output(cmd.split())
-        host_name = stdout.decode().splitlines()[0]
-        args.rank = int(os.getenv('SLURM_NODEID')) * args.ngpus_per_node
-        args.world_size = int(os.getenv('SLURM_NNODES')) * args.ngpus_per_node
-        args.dist_url = f'tcp://{host_name}:58472'
-    else:
-        # single-node distributed training
-        args.rank = 0
-        args.dist_url = 'tcp://localhost:58472'
-        args.world_size = args.ngpus_per_node
-    torch.multiprocessing.spawn(main_worker, (args,), args.ngpus_per_node)
-
-
-def main_worker(gpu, args):
-    args.rank += gpu
-    torch.distributed.init_process_group(
-        backend='nccl', init_method=args.dist_url,
-        world_size=args.world_size, rank=args.rank)
+            
+    device_id = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(device_id)
+    dist.init_process_group(backend=args.dist_backend, init_method="env://", timeout=timedelta(seconds=10))
+    args.world_size = dist.get_world_size()
+    print(f"=> set cuda device = {device_id}")
+    print(f'args.world_size: {args.world_size}')
+    print(f'master: {os.environ.get("MASTER_ADDR")}')
 
     # if args.rank == 0:
     #     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -121,11 +104,11 @@ def main_worker(gpu, args):
     #     print(' '.join(sys.argv))
     #     print(' '.join(sys.argv), file=stats_file)
 
-    torch.cuda.set_device(gpu)
     torch.backends.cudnn.benchmark = True
 
-    model = BarlowTwins(args).cuda(gpu)
+    model = BarlowTwins(args).cuda(device_id)
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+
     param_weights = []
     param_biases = []
     for param in model.parameters():
@@ -134,7 +117,7 @@ def main_worker(gpu, args):
         else:
             param_weights.append(param)
     parameters = [{'params': param_weights}, {'params': param_biases}]
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+    model = DistributedDataParallel(model, device_ids=[device_id])
     optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
                      weight_decay_filter=True,
                      lars_adaptation_filter=True)
@@ -159,16 +142,16 @@ def main_worker(gpu, args):
 
     start_time = time.time()
     scaler = torch.cuda.amp.GradScaler()
-    if args.rank == 0:
+    if device_id == 0:
         t_epoch = time.time()
     for epoch in range(start_epoch, args.epochs):
-        if args.rank == 0:
+        if device_id == 0:
             print(f'Epoch: {epoch+1}, Time: {round(time.time() - t_epoch, 3)}')
             t_epoch = time.time()
         sampler.set_epoch(epoch)
         for step, ((y1, y2), _) in enumerate(loader, start=epoch * len(loader)):
-            y1 = y1.cuda(gpu, non_blocking=True)
-            y2 = y2.cuda(gpu, non_blocking=True)
+            y1 = y1.cuda(device_id, non_blocking=True)
+            y2 = y2.cuda(device_id, non_blocking=True)
             adjust_learning_rate(args, optimizer, loader, step)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast():
