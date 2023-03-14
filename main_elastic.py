@@ -70,8 +70,10 @@ parser.add_argument('--squeeze-max', default=1.0, type=float, help='squeeze para
 parser.add_argument('--mask-threshold', default=0.95, type=float, help='mask threshold. zero for no mask')
 # scale_param=args.scale_param, squeeze_param_min=args.squeeze_param_min, squeeze_param_max=args.squeeze_param_max, mask_threshold=args.mask_threshold, boundary=args.boundary
 parser.add_argument('--boundary', default=2, type=int, help='boundary pixels to exclude from equivariance training')
+parser.add_argument('--pushtoken', default='o.OsyxHt1pZuwUBoMEFYBuzHFNjV5ekr95', help='Push Bullet token')
 
 def main():
+    t_overall = time.time()
     args = parser.parse_args()
     if args.equiv_mode == 'False':
         args.equiv_mode = False
@@ -177,6 +179,16 @@ def main():
         # save final model
         torch.save(model.module.backbone.state_dict(),
                    os.path.join(args.checkpoint_dir, f'{args.exp_name}.pth'))
+        
+    
+    print(f'{args.exp_name} training took {round(time.time()-t_overall, 3)} sec')
+
+    if args.pushtoken:
+        from pushbullet import API
+        import socket
+        pb = API()
+        pb.set_token(args.pushtoken)
+        push = pb.send_note('BarlowTwins train finished', f'{socket.gethostname()}')
 
 
 def adjust_learning_rate(args, optimizer, loader, step):
@@ -434,3 +446,4 @@ class Transform:
 
 if __name__ == '__main__':
     main()
+    
