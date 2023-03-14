@@ -20,10 +20,14 @@ from torch import nn, optim
 import torch
 import torchvision
 import torchvision.transforms as transforms
+from pygit2 import Repository
+import socket
+from datetime import datetime
+from .resnet import resnet18, resnet34, resnet50, resnet101
+
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
-parser.add_argument('data', type=Path, metavar='DIR',
-                    help='path to dataset')
+parser.add_argument('data', type=Path, default='/home/chris/storage/imagenet', metavar='DIR', help='path to dataset')
 parser.add_argument('--workers', default=8, type=int, metavar='N',
                     help='number of data loader workers')
 parser.add_argument('--epochs', default=1000, type=int, metavar='N',
@@ -42,12 +46,46 @@ parser.add_argument('--projector', default='8192-8192-8192', type=str,
                     metavar='MLP', help='projector MLP')
 parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
-parser.add_argument('--checkpoint-dir', default='./checkpoint/', type=Path,
+parser.add_argument('--checkpoint-dir', default='/nfs/thena/chris/equi/ckpts', type=Path,
                     metavar='DIR', help='path to checkpoint directory')
 
 
+
+parser.add_argument( "--dataset", default="IMAGENET", choices=["IMAGENET", "CIFAR100", "CIFAR10"], type=str, help="Dataset")
+parser.add_argument('--equiv-layer', default=3, choices=[2, 3, 4, 5], type=int, help='layer number to extract equivariance feature')
+parser.add_argument('--equiv-mode', default='False', choices=['contrastive', 'lp', 'cosine', 'equiv_only', 'False'], type=str, help='loss type to learn equivariance')
+parser.add_argument( "--p", default=2, choices=[1, 2], type=int, help="p for Lp loss")
+parser.add_argument('--num-equiv-proj', default=2, choices=[0, 1, 2], type=int, help='number of linear layers for learning equivariance')
+
+# ImageNet: BYOL(1.5e-6), SupCon(1e-4), SimCLR(1e-6), MoCo(1e-4)
+parser.add_argument('--weight-decay', default=1e-6, type=float, metavar='W', help='weight decay')
+parser.add_argument('--weight-equiv', default=1.0, type=float, help='weight for equivariant loss')
+parser.add_argument('--transform-types', type=str, nargs='+', default=['flip', 'scale', 'squeeze'], help='transfroms for equi-variance: dsc, nsd, hd')
+
+parser.add_argument('--scale-param', default=0.5, type=float, help='scale parameter')
+parser.add_argument('--squeeze-min', default=0.75, type=float, help='squeeze parameter minimum')
+parser.add_argument('--squeeze-max', default=1.0, type=float, help='squeeze parameter maximum')
+parser.add_argument('--mask-threshold', default=0.95, type=float, help='mask threshold. zero for no mask')
+# scale_param=args.scale_param, squeeze_param_min=args.squeeze_param_min, squeeze_param_max=args.squeeze_param_max, mask_threshold=args.mask_threshold, boundary=args.boundary
+parser.add_argument('--boundary', default=3, type=int, help='boundary pixels to exclude from equivariance training')
+
 def main():
     args = parser.parse_args()
+    tr=''
+    for tt in args.transform_types:
+        tr+=tt
+    args.exp_name = f'{datetime.today().strftime("%m%d")}_{socket.gethostname()}_{Repository(".").head.shorthand}_{args.dataset}_lrw{args.learning_rate_weight}_lrb{args.learning_rate_bias}_el{args.equiv_layer}_{args.equiv_mode}_'
+    +f'p{args.p}_weight_equiv{args.weight_equiv}_tr_{tr}_scale_param_{args.scale_param}_sq_{args.squeeze_min}_{args.squeeze_max}_mask_threshold_{args.mask_threshold}_boundary_{args.boundary}'
+    args.checkpoint_dir = os.path.join(args.checkpoint_dir, args.dataset)
+    if not(os.path.isdir(args.checkpoint_dir)):
+        args.checkpoint_dir = args.checkpoint_dir.replace('thena', 'thena/ext01')
+        if not(os.path.isdir(args.checkpoint_dir)):
+            tempdir = '/mnt/aitrics_ext/ext01/chris/temp'
+            if not(os.path.isdir(tempdir)):
+                os.mkdir(tempdir)
+            args.checkpoint_dir = tempdir
+
+
     args.ngpus_per_node = torch.cuda.device_count()
     if 'SLURM_JOB_ID' in os.environ:
         # single-node and multi-node distributed training on SLURM cluster
@@ -132,24 +170,24 @@ def main_worker(gpu, args):
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-            if step % args.print_freq == 0:
-                if args.rank == 0:
-                    stats = dict(epoch=epoch, step=step,
-                                 lr_weights=optimizer.param_groups[0]['lr'],
-                                 lr_biases=optimizer.param_groups[1]['lr'],
-                                 loss=loss.item(),
-                                 time=int(time.time() - start_time))
-                    print(json.dumps(stats))
-                    print(json.dumps(stats), file=stats_file)
-        if args.rank == 0:
-            # save checkpoint
-            state = dict(epoch=epoch + 1, model=model.state_dict(),
-                         optimizer=optimizer.state_dict())
-            torch.save(state, args.checkpoint_dir / 'checkpoint.pth')
+        #     if step % args.print_freq == 0:
+        #         if args.rank == 0:
+        #             stats = dict(epoch=epoch, step=step,
+        #                          lr_weights=optimizer.param_groups[0]['lr'],
+        #                          lr_biases=optimizer.param_groups[1]['lr'],
+        #                          loss=loss.item(),
+        #                          time=int(time.time() - start_time))
+        #             print(json.dumps(stats))
+        #             print(json.dumps(stats), file=stats_file)
+        # if args.rank == 0:
+        #     # save checkpoint
+        #     state = dict(epoch=epoch + 1, model=model.state_dict(),
+        #                  optimizer=optimizer.state_dict())
+        #     torch.save(state, args.checkpoint_dir / 'checkpoint.pth')
     if args.rank == 0:
         # save final model
         torch.save(model.module.backbone.state_dict(),
-                   args.checkpoint_dir / 'resnet50.pth')
+                   os.path.join(args.checkpoint_dir, f'{args.exp_name}.pth'))
 
 
 def adjust_learning_rate(args, optimizer, loader, step):
@@ -185,12 +223,20 @@ def off_diagonal(x):
 
 
 class BarlowTwins(nn.Module):
+    FEAT = {'resnet18': {1: 64, 2: 64, 3: 128, 4: 256, 5: 512},
+            'resnet34': {1: 64, 2: 64, 3: 128, 4: 256, 5: 512},
+            'resnet50': {1: 64, 2: 256, 3: 512, 4: 1024, 5: 2048},
+            'resnet101': {1: 64, 2: 256, 3: 512, 4: 1024, 5: 2048}}
+    
+    STRIDE = {'IMAGENET': {1: 4., 2: 4., 3: 8., 4: 16., 5: 32.},
+              'CIFAR100': {1: 1., 2: 1., 3: 2., 4: 4., 5: 8.},
+              'CIFAR10': {1: 1., 2: 1., 3: 2., 4: 4., 5: 8.}}
+    
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.backbone = torchvision.models.resnet50(zero_init_residual=True)
-        self.backbone.fc = nn.Identity()
-
+        self.backbone = resnet50(dataset=args.dataset, layer_num=5, zero_init_residual=True, num_classes=1000 if args.dataset == 'IMAGENET' else 100, equiv_mode=args.equiv_mode)
+        
         # projector
         sizes = [2048] + list(map(int, args.projector.split('-')))
         layers = []
@@ -199,14 +245,83 @@ class BarlowTwins(nn.Module):
             layers.append(nn.BatchNorm1d(sizes[i + 1]))
             layers.append(nn.ReLU(inplace=True))
         layers.append(nn.Linear(sizes[-2], sizes[-1], bias=False))
-        self.projector = nn.Sequential(*layers)
+        self.projector_inv = nn.Sequential(*layers)
 
         # normalization layer for the representations z1 and z2
         self.bn = nn.BatchNorm1d(sizes[-1], affine=False)
 
-    def forward(self, y1, y2):
-        z1 = self.projector(self.backbone(y1))
-        z2 = self.projector(self.backbone(y2))
+
+        if not args.equiv_mode:
+            self.forward = self.forward_inv
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.boundary = args.boundary
+        self.layer_equiv = args.layer_equiv
+
+        dim_equiv_proj=128
+        dim_equiv_encoder = BarlowTwins.FEAT['resnet50'][args.layer_equiv]
+        if args.equiv_mode:
+            layers_equiv = []
+            for i in range(args.num_equiv_proj-1):
+                layers_equiv.append(nn.Conv2d(dim_equiv_encoder, dim_equiv_encoder, kernel_size=1, bias=False))
+                layers_equiv.append(nn.BatchNorm2d(dim_equiv_encoder))
+                layers_equiv.append(nn.ReLU(inplace=True))
+
+            if args.num_equiv_proj > 0:
+                # Should bias be True?
+                layers_equiv.append(nn.Conv2d(dim_equiv_encoder, dim_equiv_proj, kernel_size=1, bias=False))   
+                
+            self.projector_equiv = nn.Sequential(*layers_equiv)
+        
+        if args.dataset =='IMAGENET':
+            size_x = 224
+        elif (args.dataset == 'CIFAR10') or (args.dataset == 'CIFAR100'):
+            size_x = 32
+        else:            
+            raise ValueError('<class GERL> Invalid dataset!')
+
+        size_equiv_encoder = int(size_x // BarlowTwins.STRIDE[args.dataset][args.layer_equiv])
+        self.shape_fx = torch.tensor([N, dim_equiv_proj, size_equiv_encoder, size_equiv_encoder])
+        self.center = torch.tensor([[float(size_equiv_encoder-1.0)/2.0, float(size_equiv_encoder-1.0)/2.0]]).expand(self.N, -1)
+
+        # transform = []
+        # transform_types.sort()
+        # for transform_type in transform_types:
+        #     assert transform_type in transforms_dict.keys()
+        #     transform.append(transforms_dict[transform_type])
+ 
+        # # SimCLR, BYOL, BarlowTwins
+        # self.aug_equiv = ImageSequential(*transform)
+        # self.not_flip = [i for i, t in enumerate(transform_types) if t!='flip']
+
+        # self.mask = torch.ones((N, 1, size_equiv_encoder, size_equiv_encoder), requires_grad=False)
+        # 256, 128, 28, 28
+    
+    def forward_equiv(self, y1, y2):
+        z1 = self.projector_equiv(self.backbone.forward_single(y1, layer_forward=self.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
+        z2 = self.projector_equiv(self.backbone.forward_single(y2, layer_forward=self.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
+        feature_equiv_fTx=torch.cat([z1, z2], dim=0)
+
+        for i in self.not_flip:
+            self.aug_equiv._params[i].data['forward_input_shape'] = self.shape_fx
+            self.aug_equiv._params[i].data['center'] = self.center
+
+        # empirical cross-correlation matrix
+        c = self.bn(z1).T @ self.bn(z2)
+
+        # sum the cross-correlation matrix between all gpus
+        c.div_(self.args.batch_size)
+        torch.distributed.all_reduce(c)
+
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        off_diag = off_diagonal(c).pow_(2).sum()
+        loss = on_diag + self.args.lambd * off_diag
+        return loss
+
+
+    def forward_inv(self, y1, y2):
+        z1 = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(y1, layer_forward=5))), 1)
+        z2 = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(y2, layer_forward=5))), 1)
 
         # empirical cross-correlation matrix
         c = self.bn(z1).T @ self.bn(z2)
