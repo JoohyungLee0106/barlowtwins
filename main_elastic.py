@@ -185,7 +185,6 @@ def main():
 
     if args.pushtoken:
         from pushbullet import API
-        import socket
         pb = API()
         pb.set_token(args.pushtoken)
         push = pb.send_note('BarlowTwins train finished', f'{socket.gethostname()}')
