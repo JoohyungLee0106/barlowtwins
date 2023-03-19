@@ -71,6 +71,7 @@ parser.add_argument('--mask-threshold', default=0.95, type=float, help='mask thr
 # scale_param=args.scale_param, squeeze_param_min=args.squeeze_param_min, squeeze_param_max=args.squeeze_param_max, mask_threshold=args.mask_threshold, boundary=args.boundary
 parser.add_argument('--boundary', default=2, type=int, help='boundary pixels to exclude from equivariance training')
 parser.add_argument('--pushtoken', default='o.OsyxHt1pZuwUBoMEFYBuzHFNjV5ekr95', help='Push Bullet token')
+parser.add_argument('--seed', default=1, type=int, help='seed for initializing training.')
 
 def main():
     t_overall = time.time()
@@ -78,11 +79,7 @@ def main():
     if args.equiv_mode == 'False':
         args.equiv_mode = False
         assert args.layer_equiv == 5
-    tr=''
-    for tt in args.transform_types:
-        tr+=tt
-    args.exp_name = f'{datetime.today().strftime("%m%d")}_{socket.gethostname()}_{Repository(".").head.shorthand}_BarlowTwins_{args.dataset}_lrw{args.learning_rate_weights}_lrb{args.learning_rate_biases}_el{args.layer_equiv}_{args.equiv_mode}_'\
-    +f'p{args.p}_weight_equiv{args.weight_equiv}_tr_{tr}_scale_param_{args.scale_param}_sq_{args.squeeze_min}_{args.squeeze_max}_mask_threshold_{args.mask_threshold}_boundary_{args.boundary}'
+    
     args.checkpoint_dir = os.path.join(args.checkpoint_dir, args.dataset)
     if not(os.path.isdir(args.checkpoint_dir)):
         args.checkpoint_dir = args.checkpoint_dir.replace('thena', 'thena/ext01')
@@ -91,6 +88,17 @@ def main():
             if not(os.path.isdir(tempdir)):
                 os.mkdir(tempdir)
             args.checkpoint_dir = tempdir
+    
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+
+    tr=''
+    for tt in args.transform_types:
+        tr+=tt        
+    args.exp_name = f'{datetime.today().strftime("%m%d")}_{socket.gethostname()}_{Repository(".").head.shorthand}_BarlowTwins_{args.dataset}_lrw{args.learning_rate_weights}_lrb{args.learning_rate_biases}_el{args.layer_equiv}_{args.equiv_mode}_'\
+    +f'p{args.p}_weight_equiv{args.weight_equiv}_tr_{tr}_scale_param_{args.scale_param}_sq_{args.squeeze_min}_{args.squeeze_max}_mask_threshold_{args.mask_threshold}_boundary_{args.boundary}'
+    torch.backends.cudnn.benchmark = True
             
     device_id = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(device_id)
@@ -99,15 +107,7 @@ def main():
     print(f"=> set cuda device = {device_id}")
     print(f'args.world_size: {args.world_size}')
     print(f'master: {os.environ.get("MASTER_ADDR")}')
-
-    # if args.rank == 0:
-    #     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    #     stats_file = open(args.checkpoint_dir / 'stats.txt', 'a', buffering=1)
-    #     print(' '.join(sys.argv))
-    #     print(' '.join(sys.argv), file=stats_file)
-
-    torch.backends.cudnn.benchmark = True
-
+    
     model = BarlowTwins(args).cuda(device_id)
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
@@ -124,18 +124,9 @@ def main():
                      weight_decay_filter=True,
                      lars_adaptation_filter=True)
 
-    # automatically resume from checkpoint if it exists
-    # if (args.checkpoint_dir / 'checkpoint.pth').is_file():
-    #     ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',
-    #                       map_location='cpu')
-    #     start_epoch = ckpt['epoch']
-    #     model.load_state_dict(ckpt['model'])
-    #     optimizer.load_state_dict(ckpt['optimizer'])
-    # else:
-    start_epoch = 0
-
     dataset = torchvision.datasets.ImageFolder(args.data / 'train', Transform())
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+    sampler = ElasticDistributedSampler(dataset)
+
     assert args.batch_size % args.world_size == 0
     per_device_batch_size = args.batch_size // args.world_size
     loader = torch.utils.data.DataLoader(
@@ -146,11 +137,11 @@ def main():
     scaler = torch.cuda.amp.GradScaler()
     if device_id == 0:
         t_epoch = time.time()
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(0, args.epochs):
         if device_id == 0:
             print(f'Epoch: {epoch+1}, Time: {round(time.time() - t_epoch, 3)}')
             t_epoch = time.time()
-        sampler.set_epoch(epoch)
+        loader.batch_sampler.sampler.set_epoch(epoch)
         for step, ((y1, y2), _) in enumerate(loader, start=epoch * len(loader)):
             y1 = y1.cuda(device_id, non_blocking=True)
             y2 = y2.cuda(device_id, non_blocking=True)
