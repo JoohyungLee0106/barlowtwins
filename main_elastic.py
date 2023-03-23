@@ -31,12 +31,12 @@ from datetime import timedelta
 import torch.backends.cudnn as cudnn
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
-parser.add_argument('--data', type=Path, default='/home/chris/storage/imagenet', help='path to dataset')
+parser.add_argument('--data', type=Path, default='/mnt/aitrics_ext/ext01/shared/tcga_stad_crop', help='path to dataset')
 parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loader workers')
 parser.add_argument('--epochs', default=4, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--batch-size', default=2048, type=int, metavar='N',
+parser.add_argument('--batch-size', default=256, type=int, metavar='N',
                     help='mini-batch size')
 parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
                     help='base learning rate for weights')
@@ -50,11 +50,11 @@ parser.add_argument('--projector', default='8192-8192-8192', type=str,
                     metavar='MLP', help='projector MLP')
 parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
-parser.add_argument('--checkpoint-dir', default='/nfs/thena/chris/equi/ckpts', type=Path, help='path to checkpoint directory')
+parser.add_argument('--checkpoint-dir', default='/mnt/aitrics_ext/ext01/shared/pathology_mil/ckpts/tcga_stad/barlowtwins', type=Path, help='path to checkpoint directory')
 parser.add_argument( "--dist-backend", default="nccl", choices=["nccl", "gloo"], type=str, help="distributed backend")
 
 
-parser.add_argument( "--dataset", default="IMAGENET", choices=["IMAGENET", "CIFAR100", "CIFAR10"], type=str, help="Dataset")
+parser.add_argument( "--dataset", default="IMAGENET", choices=["IMAGENET", "CIFAR100", "CIFAR10", "tcga_stad"], type=str, help="Dataset")
 parser.add_argument('--layer-equiv', default=5, choices=[2, 3, 4, 5], type=int, help='layer number to extract equivariance feature')
 parser.add_argument('--equiv-mode', default='False', choices=['contrastive', 'lp', 'cosine', 'equiv_only', 'False'], type=str, help='loss type to learn equivariance')
 parser.add_argument( "--p", default=2, choices=[1, 2], type=int, help="p for Lp loss")
@@ -80,9 +80,9 @@ def main():
         args.equiv_mode = False
         assert args.layer_equiv == 5
     
-    args.checkpoint_dir = os.path.join(args.checkpoint_dir, args.dataset)
+    # args.checkpoint_dir = os.path.join(args.checkpoint_dir, args.dataset)
     if not(os.path.isdir(args.checkpoint_dir)):
-        args.checkpoint_dir = args.checkpoint_dir.replace('thena', 'thena/ext01')
+        # args.checkpoint_dir = args.checkpoint_dir.replace('thena', 'thena/ext01')
         if not(os.path.isdir(args.checkpoint_dir)):
             tempdir = '/mnt/aitrics_ext/ext01/chris/temp'
             if not(os.path.isdir(tempdir)):
@@ -96,8 +96,11 @@ def main():
     tr=''
     for tt in args.transform_types:
         tr+=tt        
-    args.exp_name = f'{datetime.today().strftime("%m%d")}_{socket.gethostname()}_{Repository(".").head.shorthand}_BarlowTwins_{args.dataset}_lrw{args.learning_rate_weights}_lrb{args.learning_rate_biases}_el{args.layer_equiv}_{args.equiv_mode}_'\
-    +f'p{args.p}_weight_equiv{args.weight_equiv}_tr_{tr}_scale_param_{args.scale_param}_sq_{args.squeeze_min}_{args.squeeze_max}_mask_threshold_{args.mask_threshold}_boundary_{args.boundary}'
+    # args.exp_name = f'{datetime.today().strftime("%m%d")}_{socket.gethostname()}_{Repository(".").head.shorthand}_BarlowTwins_{args.dataset}_lrw{args.learning_rate_weights}_lrb{args.learning_rate_biases}_el{args.layer_equiv}_{args.equiv_mode}_'\
+    # +f'p{args.p}_weight_equiv{args.weight_equiv}_tr_{tr}_scale_param_{args.scale_param}_sq_{args.squeeze_min}_{args.squeeze_max}_mask_threshold_{args.mask_threshold}_boundary_{args.boundary}'
+    
+    args.exp_name = f'{datetime.today().strftime("%m%d")}_{socket.gethostname()}_{Repository(".").head.shorthand}_BarlowTwins_{args.dataset}_lrw{args.learning_rate_weights}_lrb{args.learning_rate_biases}_el{args.layer_equiv}_bs_{args.batch_size}_ep_{args.epochs}'
+    
     torch.backends.cudnn.benchmark = True
             
     device_id = int(os.environ["LOCAL_RANK"])
@@ -226,7 +229,7 @@ class BarlowTwins(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.backbone = resnet50(dataset=args.dataset, layer_num=5, zero_init_residual=True, num_classes=1000 if args.dataset == 'IMAGENET' else 100, equiv_mode=args.equiv_mode)
+        self.backbone = resnet50(dataset=args.dataset, layer_num=5, zero_init_residual=True, num_classes=1, equiv_mode=args.equiv_mode)
         
         # projector
         sizes = [2048] + list(map(int, args.projector.split('-')))
@@ -264,18 +267,18 @@ class BarlowTwins(nn.Module):
                 
             self.projector_equiv = nn.Sequential(*layers_equiv)
         
-        if args.dataset =='IMAGENET':
-            size_x = 224
-        elif (args.dataset == 'CIFAR10') or (args.dataset == 'CIFAR100'):
-            size_x = 32
-        else:            
-            raise ValueError('<class GERL> Invalid dataset!')
+        # if args.dataset =='IMAGENET':
+        #     size_x = 224
+        # elif (args.dataset == 'CIFAR10') or (args.dataset == 'CIFAR100'):
+        #     size_x = 32
+        # else:            
+        #     raise ValueError('<class GERL> Invalid dataset!')
 
-        size_equiv_encoder = int(size_x // BarlowTwins.STRIDE[args.dataset][args.layer_equiv])
-        # N이 확실치 않음
-        self.N = args.batch_size
-        self.shape_fx = torch.tensor([self.N, dim_equiv_proj, size_equiv_encoder, size_equiv_encoder])
-        self.center = torch.tensor([[float(size_equiv_encoder-1.0)/2.0, float(size_equiv_encoder-1.0)/2.0]]).expand(self.N, -1)
+        # size_equiv_encoder = int(size_x // BarlowTwins.STRIDE[args.dataset][args.layer_equiv])
+        # # N이 확실치 않음
+        # self.N = args.batch_size
+        # self.shape_fx = torch.tensor([self.N, dim_equiv_proj, size_equiv_encoder, size_equiv_encoder])
+        # self.center = torch.tensor([[float(size_equiv_encoder-1.0)/2.0, float(size_equiv_encoder-1.0)/2.0]]).expand(self.N, -1)
 
         # transform = []
         # transform_types.sort()
@@ -398,34 +401,40 @@ class Solarization(object):
 class Transform:
     def __init__(self):
         self.transform = transforms.Compose([
-            transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
+            # transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(448, scale=(0.2, 1.), interpolation=Image.BICUBIC),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(
                 [transforms.ColorJitter(brightness=0.4, contrast=0.4,
                                         saturation=0.2, hue=0.1)],
                 p=0.8
             ),
-            transforms.RandomGrayscale(p=0.2),
+            # transforms.RandomGrayscale(p=0.2),
             GaussianBlur(p=1.0),
-            Solarization(p=0.0),
+            # Solarization(p=0.0),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
+            # transforms.Normalize(mean=[0.485, 0.456, 0.406],
+            #                      std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.6655, 0.5454, 0.7476],
+                                 std=[0.1697, 0.2063, 0.1697])
         ])
         self.transform_prime = transforms.Compose([
-            transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
+            # transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(448, scale=(0.2, 1.), interpolation=Image.BICUBIC),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(
                 [transforms.ColorJitter(brightness=0.4, contrast=0.4,
                                         saturation=0.2, hue=0.1)],
                 p=0.8
             ),
-            transforms.RandomGrayscale(p=0.2),
+            # transforms.RandomGrayscale(p=0.2),
             GaussianBlur(p=0.1),
-            Solarization(p=0.2),
+            # Solarization(p=0.2),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
+            # transforms.Normalize(mean=[0.485, 0.456, 0.406],
+            #                      std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.6655, 0.5454, 0.7476],
+                                 std=[0.1697, 0.2063, 0.1697])
         ])
 
     def __call__(self, x):

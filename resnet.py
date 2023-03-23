@@ -187,7 +187,7 @@ class ResNet(nn.Module):
         # self.avgpool = nn.AvgPool2d(kernel_size=2, stride=2)
         
         self.layer = []
-        if dataset == 'IMAGENET':
+        if (dataset == 'IMAGENET') or (dataset == 'tcga_stad'):
             if equiv_mode:
                 self.layer.append(nn.Sequential(nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False),
                                         norm_layer(self.inplanes),
@@ -619,6 +619,8 @@ def resnet50(dataset: str, layer_num: int=5, zero_init_residual: bool = True, im
         kwargs['num_classes'] = 10
     elif dataset == 'CIFAR100':
         kwargs['num_classes'] = 100
+    elif dataset == 'tcga_stad':
+        kwargs['num_classes'] = 1    
     else:
         raise ValueError(f'Wrong dataset')
 
