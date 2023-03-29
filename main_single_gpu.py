@@ -29,13 +29,13 @@ from kornia.augmentation.container import ImageSequential
 
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
-parser.add_argument('--data', type=Path, default='/home/chris/storage/imagenet', help='path to dataset')
+parser.add_argument('--data', type=Path, default='/mnt/aitrics_ext/ext01/chris/storage/imagenet_eval', help='path to dataset')
 parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loader workers')
 parser.add_argument('--epochs', default=1, type=int, metavar='N',
                     help='number of total epochs to run')
 # parser.add_argument('--batch-size', default=2048, type=int, metavar='N', help='mini-batch size')
-parser.add_argument('--batch-size', default=1024, type=int, metavar='N', help='mini-batch size')
+parser.add_argument('--batch-size', default=256, type=int, metavar='N', help='mini-batch size')
 parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
                     help='base learning rate for weights')
 parser.add_argument('--learning-rate-biases', default=0.0048, type=float, metavar='LR',
@@ -54,7 +54,7 @@ parser.add_argument('--checkpoint-dir', default='/nfs/thena/chris/equi/ckpts', t
 
 parser.add_argument( "--dataset", default="IMAGENET", choices=["IMAGENET", "CIFAR100", "CIFAR10"], type=str, help="Dataset")
 parser.add_argument('--layer-equiv', default=3, choices=[2, 3, 4, 5], type=int, help='layer number to extract equivariance feature')
-parser.add_argument('--equiv-mode', default='False', choices=['contrastive', 'lp', 'cosine', 'equiv_only', 'False'], type=str, help='loss type to learn equivariance')
+parser.add_argument('--equiv-mode', default='cosine', choices=['contrastive', 'lp', 'cosine', 'equiv_only', 'False'], type=str, help='loss type to learn equivariance')
 parser.add_argument( "--p", default=2, choices=[1, 2], type=int, help="p for Lp loss")
 parser.add_argument('--num-equiv-proj', default=2, choices=[0, 1, 2], type=int, help='number of linear layers for learning equivariance')
 parser.add_argument('--dim-equiv-proj', default=128, type=int, help='feature dimension of linear layers for learning equivariance')
@@ -91,34 +91,39 @@ def main():
             args.checkpoint_dir = tempdir
 
 
-    args.ngpus_per_node = torch.cuda.device_count()
-    if 'SLURM_JOB_ID' in os.environ:
-        # single-node and multi-node distributed training on SLURM cluster
-        # requeue job on SLURM preemption
-        signal.signal(signal.SIGUSR1, handle_sigusr1)
-        signal.signal(signal.SIGTERM, handle_sigterm)
-        # find a common host name on all nodes
-        # assume scontrol returns hosts in the same order on all nodes
-        cmd = 'scontrol show hostnames ' + os.getenv('SLURM_JOB_NODELIST')
-        stdout = subprocess.check_output(cmd.split())
-        host_name = stdout.decode().splitlines()[0]
-        args.rank = int(os.getenv('SLURM_NODEID')) * args.ngpus_per_node
-        args.world_size = int(os.getenv('SLURM_NNODES')) * args.ngpus_per_node
-        args.dist_url = f'tcp://{host_name}:58472'
-    else:
-        # single-node distributed training
-        args.rank = 0
-        args.dist_url = 'tcp://localhost:58472'
-        args.world_size = args.ngpus_per_node
-    torch.multiprocessing.spawn(main_worker, (args,), args.ngpus_per_node)
+    args.ngpus_per_node = 1
+    # if 'SLURM_JOB_ID' in os.environ:
+    #     # single-node and multi-node distributed training on SLURM cluster
+    #     # requeue job on SLURM preemption
+    #     signal.signal(signal.SIGUSR1, handle_sigusr1)
+    #     signal.signal(signal.SIGTERM, handle_sigterm)
+    #     # find a common host name on all nodes
+    #     # assume scontrol returns hosts in the same order on all nodes
+    #     cmd = 'scontrol show hostnames ' + os.getenv('SLURM_JOB_NODELIST')
+    #     stdout = subprocess.check_output(cmd.split())
+    #     host_name = stdout.decode().splitlines()[0]
+    #     args.rank = int(os.getenv('SLURM_NODEID')) * args.ngpus_per_node
+    #     args.world_size = int(os.getenv('SLURM_NNODES')) * args.ngpus_per_node
+    #     args.dist_url = f'tcp://{host_name}:58472'
+    # else:
+    #     # single-node distributed training
+    #     args.rank = 0
+    #     args.dist_url = 'tcp://localhost:58472'
+    #     args.world_size = args.ngpus_per_node
+    # # torch.multiprocessing.spawn(main_worker, (args,), args.ngpus_per_node)
+    args.rank = 0
+    args.gpu = 0
+    args.world_size=1
+    args.ngpus_per_node=1
+    main_worker(args.gpu, args)
 
 
 def main_worker(gpu, args):
     t_overall = time.time()
     args.rank += gpu
-    torch.distributed.init_process_group(
-        backend='nccl', init_method=args.dist_url,
-        world_size=args.world_size, rank=args.rank)
+    # torch.distributed.init_process_group(
+    #     backend='nccl', init_method=args.dist_url,
+    #     world_size=args.world_size, rank=args.rank)
 
     # if args.rank == 0:
     #     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -128,11 +133,9 @@ def main_worker(gpu, args):
 
     torch.cuda.set_device(gpu)
     torch.backends.cudnn.benchmark = True
-    args.per_device_batch_size = args.batch_size // args.world_size
-    
+
     model = BarlowTwins(args).cuda(gpu)
-    model.mask = model.mask.cuda(gpu)
-    model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    # model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     param_weights = []
     param_biases = []
     for param in model.parameters():
@@ -141,7 +144,7 @@ def main_worker(gpu, args):
         else:
             param_weights.append(param)
     parameters = [{'params': param_weights}, {'params': param_biases}]
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+    # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
     optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
                      weight_decay_filter=True,
                      lars_adaptation_filter=True)
@@ -157,11 +160,12 @@ def main_worker(gpu, args):
     start_epoch = 0
 
     dataset = torchvision.datasets.ImageFolder(args.data / 'train', Transform())
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset)
-    assert args.batch_size % args.world_size == 0    
+    # sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+    assert args.batch_size % args.world_size == 0
+    per_device_batch_size = args.batch_size // args.world_size
     loader = torch.utils.data.DataLoader(
-        dataset, batch_size=args.per_device_batch_size, num_workers=args.workers,
-        pin_memory=True, sampler=sampler)
+        dataset, batch_size=per_device_batch_size, num_workers=args.workers,
+        pin_memory=True, sampler=None)
 
     start_time = time.time()
     scaler = torch.cuda.amp.GradScaler()
@@ -171,7 +175,7 @@ def main_worker(gpu, args):
         if args.rank == 0:
             print(f'Epoch: {epoch+1}, Time: {round(time.time() - t_epoch, 3)}')
             t_epoch = time.time()
-        sampler.set_epoch(epoch)
+        # sampler.set_epoch(epoch)
         for step, ((y1, y2), _) in enumerate(loader, start=epoch * len(loader)):
             y1 = y1.cuda(gpu, non_blocking=True)
             y2 = y2.cuda(gpu, non_blocking=True)
@@ -183,10 +187,11 @@ def main_worker(gpu, args):
             scaler.step(optimizer)
             scaler.update()
             
-    if args.rank == 0:        
-        torch.save(dict(encoder=model.module.backbone.state_dict(),
-                        projector_inv=model.module.projector_inv.state_dict() if (args.equiv_mode != 'equiv_only') else None,
-                        projector_equiv=model.module.projector_equiv.state_dict() if args.equiv_mode else None,
+    if args.rank == 0:
+        
+        torch.save(dict(encoder=model.backbone.state_dict(),
+                        projector_inv=model.projector_inv.state_dict() if (args.equiv_mode != 'equiv_only') else None,
+                        projector_equiv=model.projector_equiv.state_dict() if args.equiv_mode else None,
                         args=args),
                     os.path.join(args.checkpoint_dir, f'{args.exp_name}.pth'))
     
@@ -310,8 +315,8 @@ class BarlowTwins(nn.Module):
 
         size_equiv_encoder = int(size_x // BarlowTwins.STRIDE[args.dataset][args.layer_equiv])
                 
-        self.shape_fx = torch.tensor([args.per_device_batch_size*2, args.dim_equiv_proj, size_equiv_encoder, size_equiv_encoder])
-        self.center = torch.tensor([[float(size_equiv_encoder-1.0)/2.0, float(size_equiv_encoder-1.0)/2.0]]).expand(args.per_device_batch_size*2, -1)
+        self.shape_fx = torch.tensor([args.batch_size*2, args.dim_equiv_proj, size_equiv_encoder, size_equiv_encoder])
+        self.center = torch.tensor([[float(size_equiv_encoder-1.0)/2.0, float(size_equiv_encoder-1.0)/2.0]]).expand(args.batch_size*2, -1)
 
         transform = []
         args.transform_types.sort()
@@ -323,15 +328,17 @@ class BarlowTwins(nn.Module):
         self.aug_equiv = ImageSequential(*transform)
         self.not_flip = [i for i, t in enumerate(args.transform_types) if t!='flip']
 
-        self.mask = torch.ones((args.per_device_batch_size*2, 1, size_equiv_encoder, size_equiv_encoder), requires_grad=False)
+        self.mask = torch.ones((args.batch_size*2, 1, size_equiv_encoder, size_equiv_encoder), requires_grad=False).cuda(args.gpu)
         # 256, 128, 28, 28
 
         self.cosine_similarity = nn.CosineSimilarity(dim=1)
     
-    def forward_equiv(self, x1, x2):        
-        # x: (args.batch_sizex2) x 3 x 224 x 224
+    def forward_equiv(self, x1, x2):
+        # z1 = self.projector_equiv(self.backbone.forward_single(y1, layer_forward=self.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
+        # z2 = self.projector_equiv(self.backbone.forward_single(y2, layer_forward=self.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])        
+        
         x = torch.cat([x1, x2], dim=0)
-        # feature_equiv_fTx: (args.per_device_batch_sizex2) x args.dim_equiv_proj x ((224/STRIDE)-boundary) x ((224/STRIDE)-boundary)
+        # feature_equiv_fTx: (args.batch_sizex2) x args.dim_equiv_proj x ((224/STRIDE)-boundary) x ((224/STRIDE)-boundary)
         feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
 
         # z2 = self.projector_equiv(self.backbone.forward_single(y, layer_forward=self.args.layer_equiv)[:, :, self.args.boundary:-self.args.boundary, self.args.boundary:-self.args.boundary])        
@@ -340,24 +347,24 @@ class BarlowTwins(nn.Module):
         for i in self.not_flip:
             self.aug_equiv._params[i].data['forward_input_shape'] = self.shape_fx
             self.aug_equiv._params[i].data['center'] = self.center
-        # feature_inv: (args.per_device_batch_sizex2) x 2048 x 7 x 7
-        # feature_equiv_Tfx: (args.per_device_batch_sizex2) x (args.per_device_batch_sizex2) x ((224/STRIDE)) x ((224/STRIDE)-boundary)
+        # feature_inv: (args.batch_sizex2) x 2048 x 7 x 7
+        # feature_equiv_Tfx: (args.batch_sizex2) x (args.batch_sizex2) x ((224/STRIDE)) x ((224/STRIDE)-boundary)
         feature_inv, feature_equiv_Tfx = self.backbone.forward_joint(x, layer_equiv=self.args.layer_equiv)
         feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
         mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary]
         
         feature_inv = self.avgpool(feature_inv)
         feature_inv = torch.flatten(feature_inv, 1)
-        # feature_inv: (args.per_device_batch_sizex2) x args.dim_equiv_proj
+        # feature_inv: (args.batch_sizex2) x args.dim_equiv_proj
         feature_inv = self.projector_inv(feature_inv)
 
         # empirical cross-correlation matrix
         # c = args.dim_equiv_proj x args.dim_equiv_proj
-        c = self.bn(feature_inv[:self.args.per_device_batch_size, ::]).T @ self.bn(feature_inv[self.args.per_device_batch_size:, ::])
+        c = self.bn(feature_inv[:self.args.batch_size, ::]).T @ self.bn(feature_inv[self.args.batch_size:, ::])
 
         # sum the cross-correlation matrix between all gpus
-        c.div_(self.args.per_device_batch_size)
-        torch.distributed.all_reduce(c)
+        c.div_(self.args.batch_size)
+        # torch.distributed.all_reduce(c)
 
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
         off_diag = off_diagonal(c).pow_(2).sum()
@@ -371,19 +378,19 @@ class BarlowTwins(nn.Module):
         # z1 = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(y1, layer_forward=5)), 1))
         # z2 = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(y2, layer_forward=5)), 1))
 
-        # x1,x2 = args.per_device_batch_sizex3x224x224
+        # x1,x2 = args.batch_sizex3x224x224
         x = torch.cat([x1, x2], dim=0)
-        # feature_inv = (args.per_device_batch_sizex2) x args.projector
+        # feature_inv = (args.batch_sizex2) x args.projector
         feature_inv = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(x, layer_forward=5)), 1))
 
 
         # empirical cross-correlation matrix
         # c = args.projector x args.projector
-        c = self.bn(feature_inv[:self.args.per_device_batch_size, ::]).T @ self.bn(feature_inv[self.args.per_device_batch_size:, ::])
+        c = self.bn(feature_inv[:self.args.batch_size, ::]).T @ self.bn(feature_inv[self.args.batch_size:, ::])
 
         # sum the cross-correlation matrix between all gpus
-        c.div_(self.args.per_device_batch_size)
-        torch.distributed.all_reduce(c)
+        c.div_(self.args.batch_size)
+        # torch.distributed.all_reduce(c)
 
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
         off_diag = off_diagonal(c).pow_(2).sum()
