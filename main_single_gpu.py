@@ -29,13 +29,13 @@ from kornia.augmentation.container import ImageSequential
 
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
-parser.add_argument('--data', type=Path, default='/mnt/aitrics_ext/ext01/chris/storage/imagenet_eval', help='path to dataset')
+parser.add_argument('--data', type=Path, default='/home/chris/storage/imagenet', help='path to dataset')
 parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loader workers')
 parser.add_argument('--epochs', default=1, type=int, metavar='N',
                     help='number of total epochs to run')
 # parser.add_argument('--batch-size', default=2048, type=int, metavar='N', help='mini-batch size')
-parser.add_argument('--batch-size', default=256, type=int, metavar='N', help='mini-batch size')
+parser.add_argument('--batch-size', default=64, type=int, metavar='N', help='mini-batch size')
 parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
                     help='base learning rate for weights')
 parser.add_argument('--learning-rate-biases', default=0.0048, type=float, metavar='LR',
@@ -115,6 +115,7 @@ def main():
     args.gpu = 0
     args.world_size=1
     args.ngpus_per_node=1
+    args.per_device_batch_size = args.batch_size // args.world_size
     main_worker(args.gpu, args)
 
 
@@ -135,6 +136,7 @@ def main_worker(gpu, args):
     torch.backends.cudnn.benchmark = True
 
     model = BarlowTwins(args).cuda(gpu)
+    model.mask = model.mask.cuda(gpu)
     # model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     param_weights = []
     param_biases = []
@@ -162,10 +164,9 @@ def main_worker(gpu, args):
     dataset = torchvision.datasets.ImageFolder(args.data / 'train', Transform())
     # sampler = torch.utils.data.distributed.DistributedSampler(dataset)
     assert args.batch_size % args.world_size == 0
-    per_device_batch_size = args.batch_size // args.world_size
     loader = torch.utils.data.DataLoader(
-        dataset, batch_size=per_device_batch_size, num_workers=args.workers,
-        pin_memory=True, sampler=None)
+        dataset, batch_size=args.per_device_batch_size, num_workers=args.workers,
+        pin_memory=True, sampler=None, drop_last = True)
 
     start_time = time.time()
     scaler = torch.cuda.amp.GradScaler()
@@ -186,6 +187,7 @@ def main_worker(gpu, args):
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            print(f'step {step}')
             
     if args.rank == 0:
         
@@ -315,8 +317,8 @@ class BarlowTwins(nn.Module):
 
         size_equiv_encoder = int(size_x // BarlowTwins.STRIDE[args.dataset][args.layer_equiv])
                 
-        self.shape_fx = torch.tensor([args.batch_size*2, args.dim_equiv_proj, size_equiv_encoder, size_equiv_encoder])
-        self.center = torch.tensor([[float(size_equiv_encoder-1.0)/2.0, float(size_equiv_encoder-1.0)/2.0]]).expand(args.batch_size*2, -1)
+        self.shape_fx = torch.tensor([args.per_device_batch_size*2, args.dim_equiv_proj, size_equiv_encoder, size_equiv_encoder])
+        self.center = torch.tensor([[float(size_equiv_encoder-1.0)/2.0, float(size_equiv_encoder-1.0)/2.0]]).expand(args.per_device_batch_size*2, -1)
 
         transform = []
         args.transform_types.sort()
@@ -328,17 +330,17 @@ class BarlowTwins(nn.Module):
         self.aug_equiv = ImageSequential(*transform)
         self.not_flip = [i for i, t in enumerate(args.transform_types) if t!='flip']
 
-        self.mask = torch.ones((args.batch_size*2, 1, size_equiv_encoder, size_equiv_encoder), requires_grad=False).cuda(args.gpu)
+        self.mask = torch.ones((args.per_device_batch_size*2, 1, size_equiv_encoder, size_equiv_encoder), requires_grad=False)
         # 256, 128, 28, 28
 
         self.cosine_similarity = nn.CosineSimilarity(dim=1)
     
-    def forward_equiv(self, x1, x2):
-        # z1 = self.projector_equiv(self.backbone.forward_single(y1, layer_forward=self.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
-        # z2 = self.projector_equiv(self.backbone.forward_single(y2, layer_forward=self.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])        
-        
+    def forward_equiv(self, x1, x2):        
+        """
+        x1,x2 = args.per_device_batch_size x 3 x 224 x 224
+        """
         x = torch.cat([x1, x2], dim=0)
-        # feature_equiv_fTx: (args.batch_sizex2) x args.dim_equiv_proj x ((224/STRIDE)-boundary) x ((224/STRIDE)-boundary)
+        # feature_equiv_fTx: (args.per_device_batch_sizex2) x args.dim_equiv_proj x ((224/STRIDE)-boundary) x ((224/STRIDE)-boundary)
         feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
 
         # z2 = self.projector_equiv(self.backbone.forward_single(y, layer_forward=self.args.layer_equiv)[:, :, self.args.boundary:-self.args.boundary, self.args.boundary:-self.args.boundary])        
@@ -347,20 +349,20 @@ class BarlowTwins(nn.Module):
         for i in self.not_flip:
             self.aug_equiv._params[i].data['forward_input_shape'] = self.shape_fx
             self.aug_equiv._params[i].data['center'] = self.center
-        # feature_inv: (args.batch_sizex2) x 2048 x 7 x 7
-        # feature_equiv_Tfx: (args.batch_sizex2) x (args.batch_sizex2) x ((224/STRIDE)) x ((224/STRIDE)-boundary)
+        # feature_inv: (args.per_device_batch_sizex2) x 2048 x 7 x 7
+        # feature_equiv_Tfx: (args.per_device_batch_sizex2) x (args.per_device_batch_sizex2) x ((224/STRIDE)) x ((224/STRIDE)-boundary)
         feature_inv, feature_equiv_Tfx = self.backbone.forward_joint(x, layer_equiv=self.args.layer_equiv)
         feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
         mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary]
         
         feature_inv = self.avgpool(feature_inv)
         feature_inv = torch.flatten(feature_inv, 1)
-        # feature_inv: (args.batch_sizex2) x args.dim_equiv_proj
+        # feature_inv: (args.per_device_batch_sizex2) x args.dim_equiv_proj
         feature_inv = self.projector_inv(feature_inv)
 
         # empirical cross-correlation matrix
         # c = args.dim_equiv_proj x args.dim_equiv_proj
-        c = self.bn(feature_inv[:self.args.batch_size, ::]).T @ self.bn(feature_inv[self.args.batch_size:, ::])
+        c = self.bn(feature_inv[:self.args.per_device_batch_size, :]).T @ self.bn(feature_inv[self.args.per_device_batch_size:, :])
 
         # sum the cross-correlation matrix between all gpus
         c.div_(self.args.batch_size)
@@ -369,24 +371,22 @@ class BarlowTwins(nn.Module):
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
         off_diag = off_diagonal(c).pow_(2).sum()
         loss_inv = on_diag + self.args.lambd * off_diag
+        # loss_equiv: self.args.batch_size x 24 x 24
         loss_equiv = -self.cosine_similarity(feature_equiv_Tfx, feature_equiv_fTx)
         # 이 부분 봐야 함
         return (loss_inv/self.args.ngpus_per_node) + (self.args.weight_equiv *  torch.sum(mask.squeeze(1) * loss_equiv) / (torch.sum(mask)) )
 
 
     def forward_inv(self, x1, x2):
-        # z1 = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(y1, layer_forward=5)), 1))
-        # z2 = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(y2, layer_forward=5)), 1))
+        """
+        x1,x2 = args.per_device_batch_size x 3 x 224 x 224
+        """
 
-        # x1,x2 = args.batch_sizex3x224x224
-        x = torch.cat([x1, x2], dim=0)
-        # feature_inv = (args.batch_sizex2) x args.projector
+        x = torch.cat([x1, x2], dim=0)        
         feature_inv = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(x, layer_forward=5)), 1))
 
-
-        # empirical cross-correlation matrix
-        # c = args.projector x args.projector
-        c = self.bn(feature_inv[:self.args.batch_size, ::]).T @ self.bn(feature_inv[self.args.batch_size:, ::])
+        # c = self.bn(feature_inv1).T @ self.bn(feature_inv2)
+        c = self.bn(feature_inv[:self.args.per_device_batch_size, :]).T @ self.bn(feature_inv[self.args.per_device_batch_size:, :])
 
         # sum the cross-correlation matrix between all gpus
         c.div_(self.args.batch_size)

@@ -161,7 +161,7 @@ def main_worker(gpu, args):
     assert args.batch_size % args.world_size == 0    
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=args.per_device_batch_size, num_workers=args.workers,
-        pin_memory=True, sampler=sampler)
+        pin_memory=True, sampler=sampler, drop_last = True)
 
     start_time = time.time()
     scaler = torch.cuda.amp.GradScaler()
@@ -329,7 +329,9 @@ class BarlowTwins(nn.Module):
         self.cosine_similarity = nn.CosineSimilarity(dim=1)
     
     def forward_equiv(self, x1, x2):        
-        # x: (args.batch_sizex2) x 3 x 224 x 224
+        """
+        x1,x2 = args.per_device_batch_size x 3 x 224 x 224
+        """
         x = torch.cat([x1, x2], dim=0)
         # feature_equiv_fTx: (args.per_device_batch_sizex2) x args.dim_equiv_proj x ((224/STRIDE)-boundary) x ((224/STRIDE)-boundary)
         feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
@@ -353,36 +355,35 @@ class BarlowTwins(nn.Module):
 
         # empirical cross-correlation matrix
         # c = args.dim_equiv_proj x args.dim_equiv_proj
-        c = self.bn(feature_inv[:self.args.per_device_batch_size, ::]).T @ self.bn(feature_inv[self.args.per_device_batch_size:, ::])
+        c = self.bn(feature_inv[:self.args.per_device_batch_size, :]).T @ self.bn(feature_inv[self.args.per_device_batch_size:, :])
 
         # sum the cross-correlation matrix between all gpus
-        c.div_(self.args.per_device_batch_size)
+        c.div_(self.args.batch_size)
         torch.distributed.all_reduce(c)
 
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
         off_diag = off_diagonal(c).pow_(2).sum()
         loss_inv = on_diag + self.args.lambd * off_diag
+
+        # loss_equiv: self.args.batch_size x 24 x 24
         loss_equiv = -self.cosine_similarity(feature_equiv_Tfx, feature_equiv_fTx)
         # 이 부분 봐야 함
         return (loss_inv/self.args.ngpus_per_node) + (self.args.weight_equiv *  torch.sum(mask.squeeze(1) * loss_equiv) / (torch.sum(mask)) )
 
 
     def forward_inv(self, x1, x2):
-        # z1 = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(y1, layer_forward=5)), 1))
-        # z2 = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(y2, layer_forward=5)), 1))
+        """
+        x1,x2 = args.per_device_batch_size x 3 x 224 x 224
+        """
 
-        # x1,x2 = args.per_device_batch_sizex3x224x224
-        x = torch.cat([x1, x2], dim=0)
-        # feature_inv = (args.per_device_batch_sizex2) x args.projector
+        x = torch.cat([x1, x2], dim=0)        
         feature_inv = self.projector_inv(torch.flatten(self.avgpool(self.backbone.forward_single(x, layer_forward=5)), 1))
 
-
-        # empirical cross-correlation matrix
-        # c = args.projector x args.projector
-        c = self.bn(feature_inv[:self.args.per_device_batch_size, ::]).T @ self.bn(feature_inv[self.args.per_device_batch_size:, ::])
+        # c = self.bn(feature_inv1).T @ self.bn(feature_inv2)
+        c = self.bn(feature_inv[:self.args.per_device_batch_size, :]).T @ self.bn(feature_inv[self.args.per_device_batch_size:, :])
 
         # sum the cross-correlation matrix between all gpus
-        c.div_(self.args.per_device_batch_size)
+        c.div_(self.args.batch_size)
         torch.distributed.all_reduce(c)
 
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
