@@ -335,8 +335,10 @@ class BarlowTwins(nn.Module):
         """
         x = torch.cat([x1, x2], dim=0)
         # feature_equiv_fTx: (args.per_device_batch_sizex2) x args.dim_equiv_proj x ((224/STRIDE)-boundary) x ((224/STRIDE)-boundary)
-        feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
-
+        # if self.boundary != 0:
+        #     feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
+        # else:
+        #     feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv))
         # z2 = self.projector_equiv(self.backbone.forward_single(y, layer_forward=self.args.layer_equiv)[:, :, self.args.boundary:-self.args.boundary, self.args.boundary:-self.args.boundary])        
         
 
@@ -346,9 +348,19 @@ class BarlowTwins(nn.Module):
         # feature_inv: (args.per_device_batch_sizex2) x 2048 x 7 x 7
         # feature_equiv_Tfx: (args.per_device_batch_sizex2) x (args.per_device_batch_sizex2) x ((224/STRIDE)) x ((224/STRIDE)-boundary)
         feature_inv, feature_equiv_Tfx = self.backbone.forward_joint(x, layer_equiv=self.args.layer_equiv)
-        feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
-        if self.mask_threshold != 0:
-            mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary]
+        if self.boundary != 0:
+            feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
+            feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
+            if self.mask_threshold != 0:
+                mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary]
+        else:
+            feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv))
+            feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params))
+            if self.mask_threshold != 0:
+                mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)
+                                                     
+        # if self.mask_threshold != 0:
+        #     mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary]
         
         feature_inv = self.avgpool(feature_inv)
         feature_inv = torch.flatten(feature_inv, 1)
