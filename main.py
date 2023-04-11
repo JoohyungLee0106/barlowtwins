@@ -346,7 +346,8 @@ class BarlowTwins(nn.Module):
         # feature_equiv_Tfx: (args.per_device_batch_sizex2) x (args.per_device_batch_sizex2) x ((224/STRIDE)) x ((224/STRIDE)-boundary)
         feature_inv, feature_equiv_Tfx = self.backbone.forward_joint(x, layer_equiv=self.args.layer_equiv)
         feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
-        mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary]
+        if self.mask_threshold != 0:
+            mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary]
         
         feature_inv = self.avgpool(feature_inv)
         feature_inv = torch.flatten(feature_inv, 1)
@@ -368,7 +369,10 @@ class BarlowTwins(nn.Module):
         # loss_equiv: self.args.batch_size x 24 x 24
         loss_equiv = -self.cosine_similarity(feature_equiv_Tfx, feature_equiv_fTx)
         # 이 부분 봐야 함
-        return (loss_inv/self.args.ngpus_per_node) + (self.args.weight_equiv *  torch.sum(mask.squeeze(1) * loss_equiv) / (torch.sum(mask)) )
+        if self.mask_threshold == 0:
+            return (loss_inv/self.args.ngpus_per_node) + (self.args.weight_equiv *  torch.mean(loss_equiv) )
+        else:
+            return (loss_inv/self.args.ngpus_per_node) + (self.args.weight_equiv *  torch.sum(mask.squeeze(1) * loss_equiv) / (torch.sum(mask)) )
 
 
     def forward_inv(self, x1, x2):
