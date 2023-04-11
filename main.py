@@ -322,8 +322,8 @@ class BarlowTwins(nn.Module):
         # SimCLR, BYOL, BarlowTwins
         self.aug_equiv = ImageSequential(*transform)
         self.not_flip = [i for i, t in enumerate(args.transform_types) if t!='flip']
-
-        self.mask = torch.ones((args.per_device_batch_size*2, 1, size_equiv_encoder, size_equiv_encoder), requires_grad=False)
+        if self.mask_threshold != 0:
+            self.mask = torch.ones((args.per_device_batch_size*2, 1, size_equiv_encoder, size_equiv_encoder), requires_grad=False)
         # 256, 128, 28, 28
 
         self.cosine_similarity = nn.CosineSimilarity(dim=1)
