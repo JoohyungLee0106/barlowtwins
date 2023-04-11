@@ -131,7 +131,8 @@ def main_worker(gpu, args):
     args.per_device_batch_size = args.batch_size // args.world_size
     
     model = BarlowTwins(args).cuda(gpu)
-    model.mask = model.mask.cuda(gpu)
+    if args.mask_threshold != 0:
+        model.mask = model.mask.cuda(gpu)
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     param_weights = []
     param_biases = []
