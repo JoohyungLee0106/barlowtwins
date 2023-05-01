@@ -61,6 +61,7 @@ parser.add_argument('--dim-equiv-proj', default=128, type=int, help='feature dim
 
 # ImageNet: BYOL(1.5e-6), SupCon(1e-4), SimCLR(1e-6), MoCo(1e-4)
 parser.add_argument('--weight-equiv', default=1.0, type=float, help='weight for equivariant loss')
+parser.add_argument('--weight-enc-early', default=1.0, type=float, help='weight for the early layer where equivariant and inariance losses get added')
 parser.add_argument('--transform-types', type=str, nargs='+', default=['flip', 'scale', 'squeeze'], help='transfroms for equi-variance: dsc, nsd, hd')
 
 parser.add_argument('--scale-param', default=0.5, type=float, help='scale parameter')
@@ -89,6 +90,7 @@ def main():
             if not(os.path.isdir(tempdir)):
                 os.mkdir(tempdir)
             args.checkpoint_dir = tempdir
+
 
     args.ngpus_per_node = torch.cuda.device_count()
     if 'SLURM_JOB_ID' in os.environ:
@@ -133,14 +135,46 @@ def main_worker(gpu, args):
     if args.mask_threshold != 0:
         model.mask = model.mask.cuda(gpu)
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    param_weights = []
-    param_biases = []
-    for param in model.parameters():
+
+
+    param_weights_enc_early = []
+    param_biases_enc_early = []
+    param_weights_others = []
+    param_biases_others = []
+    # for param in model.parameters():
+    #     if param.ndim == 1:
+    #         param_biases.append(param)
+    #     else:
+    #         param_weights.append(param)    
+
+    for i in range(args.equiv_layer):
+        for param in model.encoder.layer[i].parameters():
+            if param.ndim == 1:
+                param_biases_enc_early.append(param)
+            else:
+                param_weights_enc_early.append(param)
+    for i in range(args.equiv_layer, len(model.encoder.layer)):
+        for param in model.encoder.layer[i].parameters():            
+            if param.ndim == 1:
+                param_biases_others.append(param)
+            else:
+                param_weights_others.append(param)
+    for param in model.projector_inv.parameters():
         if param.ndim == 1:
-            param_biases.append(param)
+            param_biases_others.append(param)
         else:
-            param_weights.append(param)
-    parameters = [{'params': param_weights}, {'params': param_biases}]
+            param_weights_others.append(param)
+    if args.equiv_mode:
+        for param in model.projector_equiv.parameters():
+            if param.ndim == 1:
+                param_biases_others.append(param)
+            else:
+                param_weights_others.append(param)
+
+
+    parameters = [{'params': param_weights_enc_early}, {'params': param_biases_enc_early}, {'params': param_weights_others}, {'params': param_biases_others}]
+
+    
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
     optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
                      weight_decay_filter=True,
@@ -212,8 +246,10 @@ def adjust_learning_rate(args, optimizer, loader, step):
         q = 0.5 * (1 + math.cos(math.pi * step / max_steps))
         end_lr = base_lr * 0.001
         lr = base_lr * q + end_lr * (1 - q)
-    optimizer.param_groups[0]['lr'] = lr * args.learning_rate_weights
-    optimizer.param_groups[1]['lr'] = lr * args.learning_rate_biases
+    optimizer.param_groups[0]['lr'] = lr * args.learning_rate_weights * args.weight_enc_early
+    optimizer.param_groups[1]['lr'] = lr * args.learning_rate_biases * args.weight_enc_early
+    optimizer.param_groups[2]['lr'] = lr * args.learning_rate_weights
+    optimizer.param_groups[3]['lr'] = lr * args.learning_rate_biases
 
 
 def handle_sigusr1(signum, frame):
