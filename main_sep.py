@@ -81,7 +81,7 @@ def main():
     for tt in args.transform_types:
         tr+=tt
     args.exp_name = f'{datetime.today().strftime("%m%d")}_{socket.gethostname()}_{Repository(".").head.shorthand}_BarlowTwins_{args.dataset}_lrw{args.learning_rate_weights}_lrb{args.learning_rate_biases}_el{args.layer_equiv}_{args.equiv_mode}_'\
-    +f'p{args.p}_weight_equiv{args.weight_equiv}_tr_{tr}_scale_param_{args.scale_param}_sq_{args.squeeze_min}_{args.squeeze_max}_mask_threshold_{args.mask_threshold}_boundary_{args.boundary}'
+    +f'p{args.p}_weight_equiv{args.weight_equiv}_weight_enc_early{args.weight_enc_early}_tr_{tr}_scale_param_{args.scale_param}_sq_{args.squeeze_min}_{args.squeeze_max}_mask_threshold_{args.mask_threshold}_boundary_{args.boundary}'
     args.checkpoint_dir = os.path.join(args.checkpoint_dir, args.dataset)
     if not(os.path.isdir(args.checkpoint_dir)):
         args.checkpoint_dir = args.checkpoint_dir.replace('thena', 'thena/ext01')
