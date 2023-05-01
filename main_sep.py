@@ -147,14 +147,14 @@ def main_worker(gpu, args):
     #     else:
     #         param_weights.append(param)    
 
-    for i in range(args.equiv_layer):
-        for param in model.encoder.layer[i].parameters():
+    for i in range(args.layer_equiv):
+        for param in model.backbone.layer[i].parameters():
             if param.ndim == 1:
                 param_biases_enc_early.append(param)
             else:
                 param_weights_enc_early.append(param)
-    for i in range(args.equiv_layer, len(model.encoder.layer)):
-        for param in model.encoder.layer[i].parameters():            
+    for i in range(args.layer_equiv, len(model.backbone.layer)):
+        for param in model.backbone.layer[i].parameters():            
             if param.ndim == 1:
                 param_biases_others.append(param)
             else:
