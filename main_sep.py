@@ -309,7 +309,7 @@ class BarlowTwins(nn.Module):
         transforms_dict = {
                             'flip': kornia.geometry.transform.Hflip(),
                             'scale': kornia.augmentation.RandomAffine(degrees=0, scale=(self.scale_min, self.scale_max), p=1.0),
-                            'squeeze': kornia.augmentation.RandomAffine(degrees=0, scale=(args.squeeze_min, args.squeeze_max, args.squeeze_min, args.squeeze_max), p=1.0),
+                            'squeeze': kornia.augmentation.RandomAffine(degrees=0, scale=(self.squeeze_min, self.squeeze_max, self.squeeze_min, self.squeeze_max), p=1.0),
                             'rotate': kornia.augmentation.RandomAffine(degrees=180, p=1.0)
                             }
 
@@ -375,21 +375,23 @@ class BarlowTwins(nn.Module):
         # else:
         #     feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv))
         # z2 = self.projector_equiv(self.backbone.forward_single(y, layer_forward=self.args.layer_equiv)[:, :, self.args.boundary:-self.args.boundary, self.args.boundary:-self.args.boundary])        
-        
-
-        for i in self.not_flip:
-            self.aug_equiv._params[i].data['forward_input_shape'] = self.shape_fx
-            self.aug_equiv._params[i].data['center'] = self.center
+                
         # feature_inv: (args.per_device_batch_sizex2) x 2048 x 7 x 7
         # feature_equiv_Tfx: (args.per_device_batch_sizex2) x (args.per_device_batch_sizex2) x ((224/STRIDE)) x ((224/STRIDE)-boundary)
         feature_inv, feature_equiv_Tfx = self.backbone.forward_joint(x, layer_equiv=self.args.layer_equiv)
         if self.boundary != 0:
             feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
+            for i in self.not_flip:
+                self.aug_equiv._params[i].data['forward_input_shape'] = self.shape_fx
+                self.aug_equiv._params[i].data['center'] = self.center
             feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
             if self.mask_threshold != 0:
                 mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary]
         else:
             feature_equiv_fTx = self.projector_equiv( self.backbone.forward_single(self.aug_equiv(x), layer_forward=self.args.layer_equiv))
+            for i in self.not_flip:
+                self.aug_equiv._params[i].data['forward_input_shape'] = self.shape_fx
+                self.aug_equiv._params[i].data['center'] = self.center
             feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params))
             if self.mask_threshold != 0:
                 mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)
