@@ -70,6 +70,8 @@ parser.add_argument('--squeeze-max', default=1.0, type=float, help='squeeze para
 parser.add_argument('--mask-threshold', default=0.95, type=float, help='mask threshold. zero for no mask')
 # scale_param=args.scale_param, squeeze_param_min=args.squeeze_param_min, squeeze_param_max=args.squeeze_param_max, mask_threshold=args.mask_threshold, boundary=args.boundary
 parser.add_argument('--boundary', default=2, type=int, help='boundary pixels to exclude from equivariance training')
+parser.add_argument('--translate', default=0.3, type=float, help='Translation')
+
 parser.add_argument('--pushtoken', default='o.OsyxHt1pZuwUBoMEFYBuzHFNjV5ekr95', help='Push Bullet token')
 
 def main():
@@ -80,8 +82,8 @@ def main():
     tr=''
     for tt in args.transform_types:
         tr+=tt
-    args.exp_name = f'{datetime.today().strftime("%m%d")}_{socket.gethostname()}_{Repository(".").head.shorthand}_BarlowTwins_{args.dataset}_lrw{args.learning_rate_weights}_lrb{args.learning_rate_biases}_el{args.layer_equiv}_{args.equiv_mode}_'\
-    +f'p{args.p}_weight_equiv{args.weight_equiv}_weight_enc_early{args.weight_enc_early}_tr_{tr}_scale_param_{args.scale_param}_sq_{args.squeeze_min}_{args.squeeze_max}_mask_threshold_{args.mask_threshold}_boundary_{args.boundary}'
+    args.exp_name = f'{datetime.today().strftime("%m%d")}_{socket.gethostname()}_{Repository(".").head.shorthand}_BarlowTwins_lrw{args.learning_rate_weights}_lrb{args.learning_rate_biases}_el{args.layer_equiv}_{args.equiv_mode}_'\
+    +f'weight_equiv{args.weight_equiv}_weight_enc_early{args.weight_enc_early}_tr_{tr}_scale_param_{args.scale_param}_sq_{args.squeeze_min}_{args.squeeze_max}_mask_threshold_{args.mask_threshold}_boundary_{args.boundary}_translate_{args.translate}'
     args.checkpoint_dir = os.path.join(args.checkpoint_dir, args.dataset)
     if not(os.path.isdir(args.checkpoint_dir)):
         args.checkpoint_dir = args.checkpoint_dir.replace('thena', 'thena/ext01')
@@ -91,6 +93,7 @@ def main():
                 os.mkdir(tempdir)
             args.checkpoint_dir = tempdir
 
+    print(f'{args.exp_name}')
 
     args.ngpus_per_node = torch.cuda.device_count()
     if 'SLURM_JOB_ID' in os.environ:
@@ -308,7 +311,7 @@ class BarlowTwins(nn.Module):
 
         transforms_dict = {
                             'flip': kornia.geometry.transform.Hflip(),
-                            'scale': kornia.augmentation.RandomAffine(degrees=0, scale=(self.scale_min, self.scale_max), p=1.0),
+                            'scale': kornia.augmentation.RandomAffine(degrees=0, scale=(self.scale_min, self.scale_max), p=1.0, translate=(args.translate, args.translate)),
                             'squeeze': kornia.augmentation.RandomAffine(degrees=0, scale=(self.squeeze_min, self.squeeze_max, self.squeeze_min, self.squeeze_max), p=1.0),
                             'rotate': kornia.augmentation.RandomAffine(degrees=180, p=1.0)
                             }
@@ -344,6 +347,7 @@ class BarlowTwins(nn.Module):
         else:            
             raise ValueError('<class GERL> Invalid dataset!')
 
+        self.stride = BarlowTwins.STRIDE[args.dataset][args.layer_equiv]
         size_equiv_encoder = int(size_x // BarlowTwins.STRIDE[args.dataset][args.layer_equiv])
                 
         self.shape_fx = torch.tensor([args.per_device_batch_size*2, args.dim_equiv_proj, size_equiv_encoder, size_equiv_encoder])
@@ -384,6 +388,7 @@ class BarlowTwins(nn.Module):
             for i in self.not_flip:
                 self.aug_equiv._params[i].data['forward_input_shape'] = self.shape_fx
                 self.aug_equiv._params[i].data['center'] = self.center
+                self.aug_equiv._params[i].data['translations'] /= self.stride
             feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary])
             if self.mask_threshold != 0:
                 mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)[:, :, self.boundary:-self.boundary, self.boundary:-self.boundary]
@@ -392,6 +397,7 @@ class BarlowTwins(nn.Module):
             for i in self.not_flip:
                 self.aug_equiv._params[i].data['forward_input_shape'] = self.shape_fx
                 self.aug_equiv._params[i].data['center'] = self.center
+                self.aug_equiv._params[i].data['translations'] /= self.stride
             feature_equiv_Tfx = self.projector_equiv(self.aug_equiv(feature_equiv_Tfx, params=self.aug_equiv._params))
             if self.mask_threshold != 0:
                 mask = torch.where(self.aug_equiv(self.mask, params=self.aug_equiv._params) > self.mask_threshold, 1.0, 0.0)
